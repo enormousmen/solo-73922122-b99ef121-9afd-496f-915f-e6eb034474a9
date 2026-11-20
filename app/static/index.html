@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>K8s 缩容落点试算器</title>
+<style>
+  :root { --border:#d0d7de; --bg-soft:#f6f8fa; --red:#cf222e; --green:#1a7f37; --blue:#0969da; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+         margin: 0; padding: 24px; color: #1f2328; background: #fff; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #57606a; font-size: 13px; margin-bottom: 20px; }
+  .card { border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; margin: 0 0 12px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  .field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+  input[type=file] { font-size: 13px; }
+  button { background: var(--blue); color: #fff; border: 0; border-radius: 6px;
+           padding: 8px 18px; font-size: 14px; cursor: pointer; }
+  button:disabled { background: #8c959f; cursor: not-allowed; }
+  button.secondary { background: #f6f8fa; color: #1f2328; border: 1px solid var(--border); }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+  th { background: var(--bg-soft); }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+  .tag.ok { background: #dafbe1; color: var(--green); }
+  .tag.bad { background: #ffebe9; color: var(--red); }
+  .tag.muted { background: var(--bg-soft); color: #57606a; }
+  .node-line { padding: 8px 10px; border-bottom: 1px solid var(--border); display: flex;
+               align-items: center; gap: 10px; font-size: 13px; }
+  .node-line:last-child { border-bottom: 0; }
+  .reasons { color: var(--red); font-size: 12px; }
+  .banner { border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; font-size: 14px; }
+  .banner.fail { background: #ffebe9; border: 1px solid #ffabaf; }
+  .banner.ok { background: #dafbe1; border: 1px solid #7ee787; }
+  .muted { color: #57606a; }
+  code { background: var(--bg-soft); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .scroll { max-height: 340px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+  .hidden { display: none; }
+  .count { font-size: 12px; color: #57606a; margin-left: auto; }
+</style>
+</head>
+<body>
+<h1>Kubernetes 缩容落点试算器</h1>
+<div class="sub">
+  上传同一批 NodeList / PodList JSON 快照，勾选要下线的节点（最多 <b>6</b> 个），
+  待迁 Pod 上限 <b>8</b> 个；仅支持无污点节点与无卷、无 init 容器的单容器 Pod。
+</div>
+
+<div class="card">
+  <h2>1. 上传快照</h2>
+  <div class="row">
+    <div class="field">
+      <label>NodeList JSON</label>
+      <input type="file" id="nodeFile" accept=".json,application/json">
+    </div>
+    <div class="field">
+      <label>PodList JSON</label>
+      <input type="file" id="podFile" accept=".json,application/json">
+    </div>
+    <button id="loadBtn">读取快照</button>
+    <span id="loadMsg" class="muted" style="font-size:13px"></span>
+  </div>
+</div>
+
+<div class="card hidden" id="selectCard">
+  <h2>2. 勾选要下线的节点
+    <span class="count" id="selectCount"></span>
+  </h2>
+  <div id="nodeList" class="scroll"></div>
+  <div style="margin-top:12px" class="row">
+    <button id="planBtn">试算落点</button>
+    <button class="secondary" id="clearBtn">撤下当前方案</button>
+  </div>
+</div>
+
+<div id="resultArea"></div>
+
+<script>
+let overview = null;
+let limits = { max_drain_nodes: 6, max_migrating_pods: 8 };
+
+const $ = (id) => document.getElementById(id);
+
+$("loadBtn").onclick = async () => {
+  const nf = $("nodeFile").files[0], pf = $("podFile").files[0];
+  if (!nf || !pf) { setMsg("请先选择两个 JSON 文件", true); return; }
+  const fd = new FormData();
+  fd.append("node_list", nf);
+  fd.append("pod_list", pf);
+  setMsg("读取中…");
+  try {
+    const resp = await fetch("/api/overview", { method: "POST", body: fd });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || resp.statusText);
+    overview = data;
+    limits = data.limits;
+    renderNodes();
+    clearResult();
+    setMsg(`已载入 ${data.nodes.length} 个节点、${data.pods.length} 个 Pod`);
+  } catch (e) {
+    overview = null;
+    $("selectCard").classList.add("hidden");
+    clearResult();
+    setMsg("读取失败：" + e.message, true);
+  }
+};
+
+function setMsg(text, bad) {
+  const el = $("loadMsg");
+  el.textContent = text;
+  el.style.color = bad ? "var(--red)" : "#57606a";
+}
+
+function renderNodes() {
+  $("selectCard").classList.remove("hidden");
+  const box = $("nodeList");
+  box.innerHTML = "";
+  overview.nodes.forEach((n) => {
+    const line = document.createElement("div");
+    line.className = "node-line";
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.value = n.name; cb.disabled = !n.eligible;
+    cb.onchange = updateSelectCount;
+    const name = document.createElement("b");
+    name.textContent = n.name;
+    const tag = document.createElement("span");
+    tag.className = "tag " + (n.eligible ? "ok" : "bad");
+    tag.textContent = n.eligible ? "可下线/可承接" : "不合格";
+    const spec = document.createElement("span");
+    spec.className = "muted";
+    spec.textContent = `Ready=${n.ready} cordon=${n.unschedulable} taints=${n.taint_count} `
+      + `可分配 ${n.cpu_alloc_m}m CPU / ${formatMem(n.mem_alloc_bytes)}`;
+    line.append(cb, name, tag, spec);
+    if (!n.eligible) {
+      const r = document.createElement("span");
+      r.className = "reasons";
+      r.textContent = "（" + n.ineligible_reasons.join("；") + "）";
+      line.append(r);
+    }
+    box.append(line);
+  });
+  updateSelectCount();
+}
+
+function updateSelectCount() {
+  const n = checkedNodes().length;
+  $("selectCount").textContent = `已选 ${n} / ${limits.max_drain_nodes}`;
+  $("selectCount").style.color = n > limits.max_drain_nodes ? "var(--red)" : "#57606a";
+}
+
+function checkedNodes() {
+  return [...$("nodeList").querySelectorAll('input[type=checkbox]:checked')].map(c => c.value);
+}
+
+$("planBtn").onclick = async () => {
+  const drained = checkedNodes();
+  if (drained.length === 0) { renderFail(["请至少勾选一个要下线的节点"]); return; }
+  if (drained.length > limits.max_drain_nodes) {
+    renderFail([`下线节点数 ${drained.length} 超过上限 ${limits.max_drain_nodes}，已撤下旧方案`]);
+    return;
+  }
+  const fd = new FormData();
+  fd.append("node_list", $("nodeFile").files[0]);
+  fd.append("pod_list", $("podFile").files[0]);
+  fd.append("drained_nodes", JSON.stringify(drained));
+  $("planBtn").disabled = true;
+  try {
+    const resp = await fetch("/api/plan", { method: "POST", body: fd });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || resp.statusText);
+    renderResult(data);
+  } catch (e) {
+    renderFail(["试算请求失败：" + e.message]);
+  } finally {
+    $("planBtn").disabled = false;
+  }
+};
+
+$("clearBtn").onclick = () => clearResult(true);
+
+function clearResult(showNote) {
+  $("resultArea").innerHTML = showNote
+    ? '<div class="banner muted" style="background:#f6f8fa;border:1px solid #d0d7de">已撤下旧方案。</div>'
+    : "";
+}
+
+function renderFail(messages) {
+  // 无完整方案/不支持的约束：显式撤下旧方案，不展示任何残留落点
+  $("resultArea").innerHTML =
+    '<div class="banner fail"><b>无法形成完整方案，旧方案已撤下。</b><ul style="margin:8px 0 0 18px">'
+    + messages.map(m => `<li>${escapeHtml(m)}</li>`).join("") + "</ul></div>";
+}
+
+function renderResult(data) {
+  if (!data.feasible) {
+    const msgs = [...(data.violations || [])];
+    (data.diagnostics || []).forEach(d =>
+      msgs.push(`Pod ${d.pod} 无可行节点：` + d.blockers.join("；")));
+    renderFail(msgs.length ? msgs : ["未知约束冲突"]);
+    return;
+  }
+  let html = '<div class="banner ok"><b>存在完整迁移方案：</b> '
+    + `待迁 Pod ${data.migrating_pods.length} 个，承接节点 ${data.candidates.length} 个。</div>`;
+
+  if (data.excluded_pods?.length) {
+    html += section("不迁移的 Pod（DaemonSet/静态 Pod）", table(
+      ["Pod", "所在节点", "原因"],
+      data.excluded_pods.map(e => [e.pod, e.node, e.reason])));
+  }
+
+  html += section("逐 Pod 落点", table(
+    ["Pod", "原节点", "目标节点", "CPU 请求", "内存请求"],
+    data.placement.map(p => [
+      podRef(p.pod), p.from_node, "<b>" + p.to_node + "</b>",
+      p.cpu_request_m + "m", formatMem(p.mem_request_bytes)])));
+
+  if (!data.placement.length) {
+    html += '<div class="card muted">下线节点上没有需要迁移的普通 Pod，空方案即完整方案。</div>';
+  }
+
+  html += section("各承接节点余量（已扣除节点上未结束 Pod 与迁入 Pod 的 requests）", table(
+    ["节点", "CPU 已用/可分配", "CPU 余量", "内存已用/可分配", "内存余量", "迁入 Pod"],
+    data.node_remaining.map(r => [
+      r.node,
+      `${r.used_cpu_m}m / ${r.cpu_alloc_m}m`,
+      `<b>${r.free_cpu_m}m</b>`,
+      `${formatMem(r.used_mem_bytes)} / ${formatMem(r.mem_alloc_bytes)}`,
+      `<b>${formatMem(r.free_mem_bytes)}</b>`,
+      (r.incoming_pods || []).map(podRef).join(", ") || "—",
+    ])));
+
+  $("resultArea").innerHTML = html;
+}
+
+function section(title, body) {
+  return `<div class="card"><h2>${escapeHtml(title)}</h2>${body}</div>`;
+}
+function table(headers, rows) {
+  if (!rows.length) return '<div class="muted">无</div>';
+  return "<table><thead><tr>" + headers.map(h => `<th>${h}</th>`).join("")
+    + "</tr></thead><tbody>"
+    + rows.map(r => "<tr>" + r.map(c => `<td>${c}</td>`).join("") + "</tr>").join("")
+    + "</tbody></table>";
+}
+function podRef(ref) { return "<code>" + escapeHtml(ref) + "</code>"; }
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function formatMem(bytes) {
+  if (bytes === 0) return "0";
+  const units = ["B", "Ki", "Mi", "Gi", "Ti"];
+  let v = bytes, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v >= 100 || Number.isInteger(v) ? v.toFixed(0) : v.toFixed(1)}${units[i]}`;
+}
+</script>
+</body>
+</html>

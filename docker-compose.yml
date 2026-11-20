@@ -1,0 +1,11 @@
+services:
+  drain-planner:
+    build: .
+    image: k8s-drain-planner:latest
+    container_name: k8s-drain-planner
+    ports:
+      - "8000:8000"
+    volumes:
+      # 把示例快照挂进容器，方便在网页里直接选择上传
+      - ./samples:/data/samples:ro
+    restart: unless-stopped

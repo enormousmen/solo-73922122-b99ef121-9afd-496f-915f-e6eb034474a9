@@ -1,0 +1,146 @@
+{
+  "apiVersion": "v1",
+  "kind": "NodeList",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Node",
+      "metadata": {
+        "name": "drain-1",
+        "labels": {
+          "kubernetes.io/hostname": "drain-1",
+          "workload": "app"
+        }
+      },
+      "spec": {
+        "taints": [],
+        "unschedulable": false
+      },
+      "status": {
+        "conditions": [
+          {
+            "type": "Ready",
+            "status": "True",
+            "reason": "KubeletReady"
+          }
+        ],
+        "allocatable": {
+          "cpu": "4",
+          "memory": "4096Mi"
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Node",
+      "metadata": {
+        "name": "drain-2",
+        "labels": {
+          "kubernetes.io/hostname": "drain-2",
+          "workload": "app"
+        }
+      },
+      "spec": {
+        "taints": [],
+        "unschedulable": false
+      },
+      "status": {
+        "conditions": [
+          {
+            "type": "Ready",
+            "status": "True",
+            "reason": "KubeletReady"
+          }
+        ],
+        "allocatable": {
+          "cpu": "4",
+          "memory": "4096Mi"
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Node",
+      "metadata": {
+        "name": "node-c",
+        "labels": {
+          "kubernetes.io/hostname": "node-c",
+          "workload": "app"
+        }
+      },
+      "spec": {
+        "taints": [],
+        "unschedulable": false
+      },
+      "status": {
+        "conditions": [
+          {
+            "type": "Ready",
+            "status": "True",
+            "reason": "KubeletReady"
+          }
+        ],
+        "allocatable": {
+          "cpu": "4",
+          "memory": "4096Mi"
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Node",
+      "metadata": {
+        "name": "node-d",
+        "labels": {
+          "kubernetes.io/hostname": "node-d",
+          "workload": "app"
+        }
+      },
+      "spec": {
+        "taints": [],
+        "unschedulable": false
+      },
+      "status": {
+        "conditions": [
+          {
+            "type": "Ready",
+            "status": "True",
+            "reason": "KubeletReady"
+          }
+        ],
+        "allocatable": {
+          "cpu": "4",
+          "memory": "4096Mi"
+        }
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Node",
+      "metadata": {
+        "name": "node-e",
+        "labels": {
+          "kubernetes.io/hostname": "node-e",
+          "workload": "app"
+        }
+      },
+      "spec": {
+        "taints": [],
+        "unschedulable": false
+      },
+      "status": {
+        "conditions": [
+          {
+            "type": "Ready",
+            "status": "False",
+            "reason": "KubeletReady"
+          }
+        ],
+        "allocatable": {
+          "cpu": "4",
+          "memory": "4096Mi"
+        }
+      }
+    }
+  ]
+}

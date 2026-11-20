@@ -1,0 +1,297 @@
+{
+  "apiVersion": "v1",
+  "kind": "PodList",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "redis-0",
+        "namespace": "team1",
+        "labels": {
+          "app": "redis"
+        }
+      },
+      "spec": {
+        "nodeName": "node-c",
+        "containers": [
+          {
+            "name": "redis-0-c0",
+            "resources": {
+              "requests": {
+                "cpu": "1000m",
+                "memory": "1024Mi"
+              }
+            }
+          }
+        ]
+      },
+      "status": {
+        "phase": "Running"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "queue-0",
+        "namespace": "team1",
+        "labels": {
+          "app": "queue"
+        }
+      },
+      "spec": {
+        "nodeName": "node-d",
+        "containers": [
+          {
+            "name": "queue-0-c0",
+            "resources": {
+              "requests": {
+                "cpu": "500m",
+                "memory": "512Mi"
+              }
+            }
+          }
+        ]
+      },
+      "status": {
+        "phase": "Running"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "metrics-0",
+        "namespace": "team1",
+        "labels": {
+          "app": "metrics"
+        }
+      },
+      "spec": {
+        "nodeName": "node-e",
+        "containers": [
+          {
+            "name": "metrics-0-c0",
+            "resources": {
+              "requests": {
+                "cpu": "500m",
+                "memory": "512Mi"
+              }
+            }
+          }
+        ]
+      },
+      "status": {
+        "phase": "Running"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "job-done",
+        "namespace": "team1",
+        "labels": {}
+      },
+      "spec": {
+        "nodeName": "node-c",
+        "containers": [
+          {
+            "name": "job-done-c0",
+            "resources": {
+              "requests": {
+                "cpu": "2000m",
+                "memory": "2048Mi"
+              }
+            }
+          }
+        ]
+      },
+      "status": {
+        "phase": "Succeeded"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "web-1",
+        "namespace": "team1",
+        "labels": {
+          "app": "web",
+          "tier": "frontend"
+        }
+      },
+      "spec": {
+        "nodeName": "node-a",
+        "containers": [
+          {
+            "name": "web-1-c0",
+            "resources": {
+              "requests": {
+                "cpu": "500m",
+                "memory": "512Mi"
+              }
+            }
+          }
+        ],
+        "affinity": {
+          "podAntiAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": [
+              {
+                "topologyKey": "kubernetes.io/hostname",
+                "labelSelector": {
+                  "matchLabels": {
+                    "app": "web"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "status": {
+        "phase": "Running"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "web-2",
+        "namespace": "team1",
+        "labels": {
+          "app": "web",
+          "tier": "frontend"
+        }
+      },
+      "spec": {
+        "nodeName": "node-a",
+        "containers": [
+          {
+            "name": "web-2-c0",
+            "resources": {
+              "requests": {
+                "cpu": "500m",
+                "memory": "512Mi"
+              }
+            }
+          }
+        ],
+        "affinity": {
+          "podAntiAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": [
+              {
+                "topologyKey": "kubernetes.io/hostname",
+                "labelSelector": {
+                  "matchLabels": {
+                    "app": "web"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "status": {
+        "phase": "Running"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "worker-1",
+        "namespace": "team1",
+        "labels": {
+          "app": "worker"
+        }
+      },
+      "spec": {
+        "nodeName": "node-a",
+        "containers": [
+          {
+            "name": "worker-1-c0",
+            "resources": {
+              "requests": {
+                "cpu": "1000m",
+                "memory": "1024Mi"
+              }
+            }
+          }
+        ],
+        "nodeSelector": {
+          "workload": "app"
+        }
+      },
+      "status": {
+        "phase": "Running"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "cache-1",
+        "namespace": "team1",
+        "labels": {
+          "app": "cache"
+        }
+      },
+      "spec": {
+        "nodeName": "node-b",
+        "containers": [
+          {
+            "name": "cache-1-c0",
+            "resources": {
+              "requests": {
+                "cpu": "500m",
+                "memory": "512Mi"
+              }
+            }
+          }
+        ]
+      },
+      "status": {
+        "phase": "Running"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "fluentd-node-a",
+        "namespace": "kube-system",
+        "labels": {
+          "app": "fluentd"
+        },
+        "ownerReferences": [
+          {
+            "apiVersion": "apps/v1",
+            "kind": "DaemonSet",
+            "name": "fluentd",
+            "uid": "fluentd-node-a-owner"
+          }
+        ]
+      },
+      "spec": {
+        "nodeName": "node-a",
+        "containers": [
+          {
+            "name": "fluentd-node-a-c0",
+            "resources": {
+              "requests": {
+                "cpu": "100m",
+                "memory": "64Mi"
+              }
+            }
+          }
+        ]
+      },
+      "status": {
+        "phase": "Running"
+      }
+    }
+  ]
+}

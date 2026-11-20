@@ -1,0 +1,111 @@
+{
+  "apiVersion": "v1",
+  "kind": "PodList",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "legacy-app",
+        "namespace": "team1",
+        "labels": {
+          "app": "legacy"
+        }
+      },
+      "spec": {
+        "nodeName": "drain-1",
+        "containers": [
+          {
+            "name": "legacy-app-c0",
+            "resources": {
+              "requests": {
+                "cpu": "200m",
+                "memory": "256Mi"
+              }
+            }
+          },
+          {
+            "name": "legacy-app-c1",
+            "resources": {
+              "requests": {
+                "cpu": "200m",
+                "memory": "256Mi"
+              }
+            }
+          }
+        ],
+        "volumes": [
+          {
+            "name": "vol0",
+            "emptyDir": {}
+          }
+        ]
+      },
+      "status": {
+        "phase": "Running"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "init-app",
+        "namespace": "team1",
+        "labels": {
+          "app": "initapp"
+        }
+      },
+      "spec": {
+        "nodeName": "drain-1",
+        "containers": [
+          {
+            "name": "init-app-c0",
+            "resources": {
+              "requests": {
+                "cpu": "200m",
+                "memory": "256Mi"
+              }
+            }
+          }
+        ],
+        "initContainers": [
+          {
+            "name": "init-app-init0",
+            "image": "busybox"
+          }
+        ]
+      },
+      "status": {
+        "phase": "Running"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "plain-app",
+        "namespace": "team1",
+        "labels": {
+          "app": "plain"
+        }
+      },
+      "spec": {
+        "nodeName": "drain-tainted",
+        "containers": [
+          {
+            "name": "plain-app-c0",
+            "resources": {
+              "requests": {
+                "cpu": "200m",
+                "memory": "256Mi"
+              }
+            }
+          }
+        ]
+      },
+      "status": {
+        "phase": "Running"
+      }
+    }
+  ]
+}
