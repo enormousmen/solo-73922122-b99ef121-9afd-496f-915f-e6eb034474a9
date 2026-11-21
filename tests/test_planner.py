@@ -181,8 +181,7 @@ def test_migrating_pod_limit_enforced():
 
 # --------------------------------------------------------------------------- #
 # 双向反亲和专项
-# --------------------------------------------------------------------------- #
-def test_reverse_direction_anti_affinity_blocks_placement():
+# --------------------------------------------------------------------------- #def test_reverse_direction_anti_affinity_blocks_placement():
     """B 不声明反亲和，但 A 声明的选择器命中 B：同节点仍须禁止。"""
     from scripts.generate_samples import node as mk_node, pod as mk_pod, node_list, pod_list
     raw_nodes = node_list([mk_node("d1", "4", 4096), mk_node("c1", "4", 4096)])
@@ -243,6 +242,158 @@ def test_unsupported_affinity_constraints_flagged():
 
 
 # --------------------------------------------------------------------------- #
+# 待核验（常驻 Pod 的 matchExpressions 硬反亲和）专项
+# --------------------------------------------------------------------------- #
+def _mk_anti_expressions_pod(namespace, name, node_name, **kw):
+    from scripts.generate_samples import pod as mk_pod
+    p = mk_pod(namespace, name, node_name, kw.pop("cpu_m", 100),
+               kw.pop("mem_mi", 128), labels=kw.pop("labels", {"app": "db"}), **kw)
+    p["spec"]["affinity"] = {
+        "podAntiAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": [
+                {"topologyKey": HOSTNAME_TOPOLOGY_KEY,
+                 "labelSelector": {"matchExpressions": [
+                     {"key": "app", "operator": "In", "values": ["web"]}]}}
+            ]
+        }
+    }
+    return p
+
+
+def test_parse_records_unverifiable_term_and_keeps_unsupported():
+    from scripts.generate_samples import pod_list
+    pods = parse_pods(pod_list([_mk_anti_expressions_pod("team1", "db-0", "node-b")]))
+    pod = pods[0]
+    # 表达式仍按不支持处理
+    assert any("matchExpressions" in r for r in pod.unsupported_reasons)
+    # 同时记入待核验条款（默认同命名空间 + hostname 拓扑键）
+    assert len(pod.unverifiable_anti_terms) == 1
+    assert pod.unverifiable_anti_terms[0].expressions == [
+        {"key": "app", "operator": "In", "values": ["web"]}
+    ]
+
+
+def test_explicit_namespaces_term_is_not_unverifiable():
+    """显式 namespaces / namespaceSelector 超出默认同命名空间，只报不支持。"""
+    from scripts.generate_samples import pod_list
+    p = _mk_anti_expressions_pod("team1", "db-0", "node-b")
+    term = p["spec"]["affinity"]["podAntiAffinity"][
+        "requiredDuringSchedulingIgnoredDuringExecution"][0]
+    term["namespaces"] = ["team1"]
+    pod = parse_pods(pod_list([p]))[0]
+    assert any("matchExpressions" in r for r in pod.unsupported_reasons)
+    assert pod.unverifiable_anti_terms == []
+
+    p2 = _mk_anti_expressions_pod("team1", "db-1", "node-b")
+    term2 = p2["spec"]["affinity"]["podAntiAffinity"][
+        "requiredDuringSchedulingIgnoredDuringExecution"][0]
+    term2["namespaceSelector"] = {"matchLabels": {"team": "one"}}
+    pod2 = parse_pods(pod_list([p2]))[0]
+    assert pod2.unverifiable_anti_terms == []
+
+
+def test_unverifiable_avoidable_scenario_shown_normally():
+    """能避开待核验落点的完整方案照常展示。"""
+    nodes, pods, drains = load_scenario("unverifiable-avoidable")
+    result = run_plan(nodes, pods, drains)
+    assert result.feasible is True
+    assert result.status == "feasible"
+    assert result.pending_verification == []
+    placement = {p["pod"]: p["to_node"] for p in result.placement}
+    # web-1 避开待核验的 node-b，落到 node-c
+    assert placement["team1/web-1"] == "node-c"
+
+
+def test_unverifiable_scenario_cannot_confirm():
+    """只有放开待核验落点才有完整方案：无法确认并点名常驻 Pod 与拓扑域。"""
+    nodes, pods, drains = load_scenario("unverifiable")
+    result = run_plan(nodes, pods, drains)
+    assert result.feasible is False
+    assert result.status == "unverifiable"
+    # 撤下旧落点：不下发任何 placement
+    assert result.placement == []
+    assert result.violations
+    pending = result.pending_verification
+    assert len(pending) == 1
+    entry = pending[0]
+    assert entry["pod"] == "team1/web-1"
+    assert entry["node"] == "node-b"
+    assert entry["resident_pod"] == "team1/db-0"
+    assert entry["topology_key"] == HOSTNAME_TOPOLOGY_KEY
+    assert entry["topology_value"] == "node-b"
+    assert entry["expressions"] == [
+        {"key": "app", "operator": "In", "values": ["web"]}
+    ]
+
+
+def test_unverifiable_relaxed_still_infeasible_reports_no_plan():
+    """放开待核验落点后依然无解：报告无完整方案。"""
+    from scripts.generate_samples import node as mk_node, pod as mk_pod, node_list, pod_list
+    raw_nodes = node_list([mk_node("d1", "4", 4096), mk_node("c1", "4", 4096)])
+    resident = _mk_anti_expressions_pod("team1", "db-0", "c1", cpu_m=500)
+    raw_pods = pod_list([
+        resident,
+        # c1 剩余 3500m，web-1 需要 3800m：放开待核验也放不下
+        mk_pod("team1", "web-1", "d1", 3800, 128, labels={"app": "web"}),
+    ])
+    result = run_plan(parse_nodes(raw_nodes), parse_pods(raw_pods), ["d1"])
+    assert result.feasible is False
+    assert result.status == "infeasible"
+    assert result.placement == []
+    assert result.pending_verification == []
+    assert any("放开待核验落点后仍不存在" in v for v in result.violations)
+
+
+def test_unverifiable_scoped_to_same_namespace():
+    """常驻 Pod 的条款默认只匹配其自身命名空间，跨命名空间不待核验。"""
+    from scripts.generate_samples import node as mk_node, pod as mk_pod, node_list, pod_list
+    raw_nodes = node_list([mk_node("d1", "4", 4096), mk_node("c1", "4", 4096)])
+    raw_pods = pod_list([
+        _mk_anti_expressions_pod("other", "db-0", "c1", cpu_m=100),
+        mk_pod("team1", "web-1", "d1", 100, 128, labels={"app": "web"}),
+    ])
+    result = run_plan(parse_nodes(raw_nodes), parse_pods(raw_pods), ["d1"])
+    assert result.feasible is True
+    assert result.placement[0]["to_node"] == "c1"
+
+
+def test_ended_resident_pod_term_not_unverifiable():
+    """已结束（Succeeded）的常驻 Pod 不占资源，其条款也不产生待核验。"""
+    from scripts.generate_samples import node as mk_node, pod as mk_pod, node_list, pod_list
+    raw_nodes = node_list([mk_node("d1", "4", 4096), mk_node("c1", "4", 4096)])
+    raw_pods = pod_list([
+        _mk_anti_expressions_pod("team1", "db-0", "c1", cpu_m=100,
+                                 phase="Succeeded"),
+        mk_pod("team1", "web-1", "d1", 100, 128, labels={"app": "web"}),
+    ])
+    result = run_plan(parse_nodes(raw_nodes), parse_pods(raw_pods), ["d1"])
+    assert result.feasible is True
+    assert result.placement[0]["to_node"] == "c1"
+
+
+def test_migrating_pod_with_match_expressions_still_rejected():
+    """待迁 Pod 自身的 matchExpressions 硬反亲和仍按不支持处理。"""
+    from scripts.generate_samples import node as mk_node, node_list, pod_list
+    raw_nodes = node_list([mk_node("d1", "4", 4096), mk_node("c1", "4", 4096)])
+    raw_pods = pod_list([_mk_anti_expressions_pod("team1", "web-1", "d1")])
+    result = run_plan(parse_nodes(raw_nodes), parse_pods(raw_pods), ["d1"])
+    assert result.feasible is False
+    assert result.status == "infeasible"
+    assert any("不支持的约束" in v and "matchExpressions" in v
+               for v in result.violations)
+
+
+def test_unverifiable_blocker_listed_in_diagnostics():
+    """严格模式失败时，诊断信息应指出落入待核验拓扑域的常驻 Pod。"""
+    nodes, pods, drains = load_scenario("unverifiable")
+    result = run_plan(nodes, pods, drains)
+    assert result.status == "unverifiable"
+    diag = {d["pod"]: d for d in result.diagnostics}
+    blockers = "；".join(diag["team1/web-1"]["blockers"])
+    assert "待核验" in blockers and "team1/db-0" in blockers
+
+
+# --------------------------------------------------------------------------- #
 # HTTP 接口
 # --------------------------------------------------------------------------- #
 def _post_plan(scenario: str):
@@ -270,6 +421,26 @@ def test_http_infeasible_and_health():
     data = resp.json()
     assert data["feasible"] is False and data["violations"]
     assert client.get("/healthz").json() == {"status": "ok"}
+
+
+def test_http_unverifiable():
+    resp = _post_plan("unverifiable")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "unverifiable"
+    assert data["feasible"] is False
+    assert data["placement"] == []
+    assert data["pending_verification"][0]["resident_pod"] == "team1/db-0"
+    assert data["pending_verification"][0]["topology_key"] == HOSTNAME_TOPOLOGY_KEY
+
+
+def test_http_unverifiable_avoidable():
+    resp = _post_plan("unverifiable-avoidable")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "feasible"
+    assert data["feasible"] is True
+    assert data["pending_verification"] == []
 
 
 def test_http_overview_lists_eligibility():

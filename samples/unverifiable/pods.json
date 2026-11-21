@@ -1,0 +1,110 @@
+{
+  "apiVersion": "v1",
+  "kind": "PodList",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "db-0",
+        "namespace": "team1",
+        "labels": {
+          "app": "db"
+        }
+      },
+      "spec": {
+        "nodeName": "node-b",
+        "containers": [
+          {
+            "name": "db-0-c0",
+            "resources": {
+              "requests": {
+                "cpu": "500m",
+                "memory": "512Mi"
+              }
+            }
+          }
+        ],
+        "affinity": {
+          "podAntiAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": [
+              {
+                "topologyKey": "kubernetes.io/hostname",
+                "labelSelector": {
+                  "matchExpressions": [
+                    {
+                      "key": "app",
+                      "operator": "In",
+                      "values": [
+                        "web"
+                      ]
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      },
+      "status": {
+        "phase": "Running"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "fill-c",
+        "namespace": "team1",
+        "labels": {
+          "app": "fill"
+        }
+      },
+      "spec": {
+        "nodeName": "node-c",
+        "containers": [
+          {
+            "name": "fill-c-c0",
+            "resources": {
+              "requests": {
+                "cpu": "3600m",
+                "memory": "3584Mi"
+              }
+            }
+          }
+        ]
+      },
+      "status": {
+        "phase": "Running"
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "web-1",
+        "namespace": "team1",
+        "labels": {
+          "app": "web"
+        }
+      },
+      "spec": {
+        "nodeName": "drain-1",
+        "containers": [
+          {
+            "name": "web-1-c0",
+            "resources": {
+              "requests": {
+                "cpu": "500m",
+                "memory": "512Mi"
+              }
+            }
+          }
+        ]
+      },
+      "status": {
+        "phase": "Running"
+      }
+    }
+  ]
+}

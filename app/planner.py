@@ -7,7 +7,13 @@
   的 requests 从 allocatable 中扣除；
 - 所有待迁 Pod 必须在同一份方案中同时放下，且满足 nodeSelector；
 - 双向检查同命名空间内、以 kubernetes.io/hostname 为拓扑键的
-  matchLabels 硬反亲和。
+  matchLabels 硬反亲和；
+- 常驻 Pod（未下线节点上尚未结束）的硬反亲和含 matchExpressions 时，
+  表达式不求值：默认匹配同命名空间、拓扑键为 hostname 的条款会把
+  同命名空间待迁 Pod 落入该拓扑域（同一节点）的落点标为待核验。
+  第一轮严格避开待核验落点，找到完整方案照常展示；只有放开待核验
+  落点才有完整方案时判定“无法确认”，点名一份候选方案涉及的常驻 Pod
+  与拓扑域并撤下落点；放开后仍无解则报告无完整方案。
 """
 from __future__ import annotations
 
@@ -38,6 +44,7 @@ class Candidate:
 class PlanResult:
     feasible: bool
     drained_nodes: list[str]
+    status: str = "infeasible"  # feasible / unverifiable / infeasible
     excluded_pods: list[dict] = field(default_factory=list)
     migrating_pods: list[str] = field(default_factory=list)
     candidates: list[dict] = field(default_factory=list)
@@ -45,6 +52,7 @@ class PlanResult:
     node_remaining: list[dict] = field(default_factory=list)
     violations: list[str] = field(default_factory=list)
     diagnostics: list[dict] = field(default_factory=list)
+    pending_verification: list[dict] = field(default_factory=list)
 
 
 def _node_eligibility(node: NodeInfo) -> list[str]:
@@ -123,16 +131,6 @@ class Planner:
         # 2. 构建承接节点，扣除仍在该节点且尚未结束的 Pod 请求量
         candidates = self._build_candidates(drained, migrating, excluded)
 
-        # 3. 预先计算每个待迁 Pod 的可行承接节点
-        feasible_map: dict[str, list[str]] = {}
-        diagnostics: list[dict] = []
-        for pod in sorted(migrating, key=lambda p: p.name):
-            feasible = [c.node.name for c in candidates if self._can_place(pod, c, {})]
-            feasible_map[pod.ref] = feasible
-            if not feasible:
-                blockers = self._blocker_reasons(pod, candidates)
-                diagnostics.append({"pod": pod.ref, "blockers": blockers})
-
         candidate_payload = [
             {
                 "node": c.node.name,
@@ -152,44 +150,95 @@ class Planner:
             excluded_pods=excluded,
             migrating_pods=[p.ref for p in sorted(migrating, key=lambda p: p.name)],
             candidates=candidate_payload,
-            diagnostics=diagnostics,
         )
 
         if not migrating:
             # 没有需要迁移的普通 Pod，空方案本身就是完整方案
             base.feasible = True
+            base.status = "feasible"
             base.node_remaining = self._remaining_payload(candidates, {})
             return base
 
-        if diagnostics:
-            base.violations.append("存在对任何承接节点都不可调度的待迁 Pod，无完整方案")
+        # 3. 第一轮：严格避开待核验落点（常驻 Pod 的 matchExpressions 硬反亲和）
+        strict_map = self._feasible_map(migrating, candidates)
+        diagnostics: list[dict] = []
+        for pod in sorted(migrating, key=lambda p: p.name):
+            if not strict_map[pod.ref]:
+                diagnostics.append(
+                    {"pod": pod.ref, "blockers": self._blocker_reasons(pod, candidates)}
+                )
+        base.diagnostics = diagnostics
+
+        strict_assignment: dict[str, str] | None = None
+        ordered: list[PodInfo] = []
+        if not diagnostics:
+            ordered = sorted(migrating, key=lambda p: (len(strict_map[p.ref]), p.name))
+            assignment: dict[str, str] = {}
+            if self._backtrack(ordered, 0, candidates, strict_map, assignment):
+                strict_assignment = assignment
+
+        if strict_assignment is not None:
+            base.feasible = True
+            base.status = "feasible"
+            base.placement = [
+                {
+                    "pod": pod.ref,
+                    "from_node": pod.node,
+                    "to_node": strict_assignment[pod.ref],
+                    "cpu_request_m": pod.cpu_request_m,
+                    "mem_request_bytes": pod.mem_request_bytes,
+                }
+                for pod in sorted(migrating, key=lambda p: p.name)
+            ]
+            base.node_remaining = self._remaining_payload(candidates, strict_assignment)
             return base
 
-        # 4. 回溯：所有待迁 Pod 必须同时放下
-        ordered = sorted(migrating, key=lambda p: (len(feasible_map[p.ref]), p.name))
-        assignment: dict[str, str] = {}
-        found = self._backtrack(ordered, 0, candidates, feasible_map, assignment)
-        if not found:
+        # 4. 严格模式失败：没有待核验条款可放开时，按原有逻辑判定无完整方案
+        if not self._unverifiable_in_play(candidates, migrating):
+            if diagnostics:
+                base.violations.append("存在对任何承接节点都不可调度的待迁 Pod，无完整方案")
+            else:
+                base.violations.append(
+                    "反亲和/资源约束冲突：不存在让全部待迁 Pod 同时落地的完整方案"
+                )
+                base.diagnostics.extend(
+                    self._explain_backtrack_failure(ordered, candidates, strict_map)
+                )
+            return base
+
+        # 5. 第二轮：放开待核验落点再试，验证“无法确认”与“无完整方案”的边界
+        relaxed_map = self._feasible_map(migrating, candidates, allow_unverifiable=True)
+        relaxed_assignment: dict[str, str] | None = None
+        if all(relaxed_map[p.ref] for p in migrating):
+            relaxed_ordered = sorted(
+                migrating, key=lambda p: (len(relaxed_map[p.ref]), p.name)
+            )
+            assignment = {}
+            if self._backtrack(relaxed_ordered, 0, candidates, relaxed_map,
+                               assignment, allow_unverifiable=True):
+                relaxed_assignment = assignment
+
+        if relaxed_assignment is None:
             base.violations.append(
-                "反亲和/资源约束冲突：不存在让全部待迁 Pod 同时落地的完整方案"
+                "放开待核验落点后仍不存在让全部待迁 Pod 同时落地的完整方案"
             )
-            base.diagnostics.extend(
-                self._explain_backtrack_failure(ordered, candidates, feasible_map)
-            )
+            if not diagnostics:
+                base.diagnostics.extend(
+                    self._explain_backtrack_failure(
+                        sorted(migrating,
+                               key=lambda p: (len(relaxed_map[p.ref]), p.name)),
+                        candidates, relaxed_map,
+                    )
+                )
             return base
 
-        base.feasible = True
-        base.placement = [
-            {
-                "pod": pod.ref,
-                "from_node": pod.node,
-                "to_node": assignment[pod.ref],
-                "cpu_request_m": pod.cpu_request_m,
-                "mem_request_bytes": pod.mem_request_bytes,
-            }
-            for pod in sorted(migrating, key=lambda p: p.name)
-        ]
-        base.node_remaining = self._remaining_payload(candidates, assignment)
+        # 只有放开待核验落点才有完整方案：无法确认，点名涉及的常驻 Pod 与拓扑域
+        base.status = "unverifiable"
+        base.pending_verification = self._pending_payload(relaxed_assignment)
+        base.violations.append(
+            "只有放开待核验落点才有完整方案：常驻 Pod 的 matchExpressions 硬反亲和"
+            "未参与求值，落点无法确认，已撤下旧方案"
+        )
         return base
 
     # ------------------------------------------------------------------ #
@@ -236,8 +285,79 @@ class Planner:
                                         used_mem_bytes=used_mem))
         return candidates
 
+    def _feasible_map(
+        self,
+        migrating: list[PodInfo],
+        candidates: list[Candidate],
+        allow_unverifiable: bool = False,
+    ) -> dict[str, list[str]]:
+        """每个待迁 Pod 的可行承接节点（严格模式默认避开待核验落点）。"""
+        return {
+            pod.ref: [
+                c.node.name for c in candidates
+                if self._can_place(pod, c, {}, allow_unverifiable)
+            ]
+            for pod in sorted(migrating, key=lambda p: p.name)
+        }
+
+    def _unverifiable_conflicts(self, pod: PodInfo, node_name: str) -> list[PodInfo]:
+        """位于该节点、同命名空间且带未核验反亲和条款的常驻 Pod。
+
+        条款默认匹配同命名空间、拓扑键为 hostname，因此待迁 Pod 落入
+        该节点即落入其拓扑域；matchExpressions 不求值，只能标为待核验。
+        """
+        return [
+            other for other in self.pods
+            if other.ref != pod.ref
+            and other.unverifiable_anti_terms
+            and other.active
+            and other.namespace == pod.namespace
+            and other.node == node_name
+        ]
+
+    def _unverifiable_in_play(
+        self, candidates: list[Candidate], migrating: list[PodInfo]
+    ) -> bool:
+        """承接节点上是否存在影响本批待迁 Pod 的待核验反亲和条款。"""
+        candidate_nodes = {c.node.name for c in candidates}
+        namespaces = {p.namespace for p in migrating}
+        migrating_keys = {(p.namespace, p.name) for p in migrating}
+        return any(
+            pod.unverifiable_anti_terms
+            and pod.active
+            and pod.namespace in namespaces
+            and pod.node in candidate_nodes
+            and (pod.namespace, pod.name) not in migrating_keys
+            for pod in self.pods
+        )
+
+    def _pending_payload(self, assignment: dict[str, str]) -> list[dict]:
+        """一份候选方案实际用到的待核验落点：点名常驻 Pod 与拓扑域。"""
+        pending: list[dict] = []
+        for pod in sorted(self._migrating, key=lambda p: p.name):
+            node_name = assignment[pod.ref]
+            node = self.nodes[node_name]
+            for resident in self._unverifiable_conflicts(pod, node_name):
+                pending.append({
+                    "pod": pod.ref,
+                    "node": node_name,
+                    "resident_pod": resident.ref,
+                    "topology_key": HOSTNAME_TOPOLOGY_KEY,
+                    "topology_value": node.labels.get(HOSTNAME_TOPOLOGY_KEY, node_name),
+                    "expressions": [
+                        expr
+                        for term in resident.unverifiable_anti_terms
+                        for expr in term.expressions
+                    ],
+                })
+        return pending
+
     def _can_place(
-        self, pod: PodInfo, candidate: Candidate, assignment: dict[str, str]
+        self,
+        pod: PodInfo,
+        candidate: Candidate,
+        assignment: dict[str, str],
+        allow_unverifiable: bool = False,
     ) -> bool:
         node = candidate.node
         # nodeSelector
@@ -267,6 +387,9 @@ class Planner:
                 continue
             if self._anti_conflict(pod, other):
                 return False
+        # 常驻 Pod 的 matchExpressions 硬反亲和：表达式不求值，落点待核验
+        if not allow_unverifiable and self._unverifiable_conflicts(pod, node.name):
+            return False
         return True
 
     def _assigned_pods(self, assignment: dict[str, str]) -> list[PodInfo]:
@@ -293,16 +416,17 @@ class Planner:
         candidates: list[Candidate],
         feasible_map: dict[str, list[str]],
         assignment: dict[str, str],
+        allow_unverifiable: bool = False,
     ) -> bool:
         if index == len(ordered):
             return True
         pod = ordered[index]
         for node_name in feasible_map[pod.ref]:
             candidate = self._candidate(candidates, node_name)
-            if self._can_place(pod, candidate, assignment):
+            if self._can_place(pod, candidate, assignment, allow_unverifiable):
                 assignment[pod.ref] = node_name
                 if self._backtrack(ordered, index + 1, candidates,
-                                   feasible_map, assignment):
+                                   feasible_map, assignment, allow_unverifiable):
                     return True
                 del assignment[pod.ref]
         return False
@@ -343,6 +467,15 @@ class Planner:
                 ]
                 if resident_conflicts:
                     reasons.append(f"与节点常驻 Pod 硬反亲和冲突：{resident_conflicts}")
+                unverifiable = [
+                    o.ref for o in self._unverifiable_conflicts(pod, node.name)
+                    if o.ref not in migrating_refs
+                ]
+                if unverifiable:
+                    reasons.append(
+                        "常驻 Pod 带未核验的 matchExpressions 硬反亲和"
+                        f"（落入该拓扑域待核验）：{unverifiable}"
+                    )
                 peer_conflicts = [
                     other.ref for other in self._migrating
                     if other.ref != pod.ref and self._anti_conflict(pod, other)
@@ -381,6 +514,14 @@ class Planner:
             ]
             if conflicts:
                 node_reasons.append(f"硬反亲和冲突：{conflicts}")
+            unverifiable = [
+                o.ref for o in self._unverifiable_conflicts(pod, candidate.node.name)
+            ]
+            if unverifiable:
+                node_reasons.append(
+                    "常驻 Pod 带未核验的 matchExpressions 硬反亲和"
+                    f"（落入该拓扑域待核验）：{unverifiable}"
+                )
             blockers.append(f"{candidate.node.name}: {'；'.join(node_reasons)}")
         return blockers
 

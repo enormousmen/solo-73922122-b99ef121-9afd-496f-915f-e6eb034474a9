@@ -132,6 +132,7 @@ async def plan_json(req: PlanRequest):
 def _serialize(result) -> dict:
     return {
         "feasible": result.feasible,
+        "status": result.status,
         "drained_nodes": result.drained_nodes,
         "excluded_pods": result.excluded_pods,
         "migrating_pods": result.migrating_pods,
@@ -140,6 +141,7 @@ def _serialize(result) -> dict:
         "node_remaining": result.node_remaining,
         "violations": result.violations,
         "diagnostics": result.diagnostics,
+        "pending_verification": result.pending_verification,
         "limits": {
             "max_drain_nodes": MAX_DRAIN_NODES,
             "max_migrating_pods": MAX_MIGRATING_PODS,

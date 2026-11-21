@@ -2,7 +2,8 @@
 
 值班员在缩容前上传同一批 **NodeList / PodList JSON 快照**，在网页勾选要下线的节点，
 系统在其余就绪可调度的节点上为全部待迁 Pod 寻找**同时成立**的落点方案，
-并给出逐 Pod 落点与各承接节点余量。无完整方案或遇到不支持的约束时，
+并给出逐 Pod 落点与各承接节点余量。无完整方案、遇到不支持的约束、或方案只能
+落在**待核验**落点（常驻 Pod 的 `matchExpressions` 硬反亲和未求值）时，
 明确给出原因并由前端撤下旧方案（不展示任何残留落点）。
 
 ## 试算规则
@@ -15,6 +16,7 @@
 | 资源口径 | 从节点 `status.allocatable` 中扣除**仍在该节点且尚未结束**（phase 非 Succeeded/Failed）的 Pod 的 CPU/内存 **requests**；待迁 Pod 不计入原节点占用 |
 | 调度约束 | 支持 `nodeSelector`；硬 `nodeAffinity`、硬 `podAffinity` 报不支持 |
 | 反亲和 | 仅支持同命名空间内、拓扑键为 `kubernetes.io/hostname`、`labelSelector.matchLabels` 的**硬** `podAntiAffinity`；**双向检查**（A 的选择器命中 B 或 B 的选择器命中 A 都算冲突）；其他拓扑键、`matchExpressions` 报不支持；软约束（preferred）忽略 |
+| 待核验落点 | 常驻 Pod（未下线节点上尚未结束）的硬反亲和含 `matchExpressions` 时表达式不求值：默认匹配同命名空间、拓扑键为 `kubernetes.io/hostname` 的条款，会把同命名空间待迁 Pod 落入该拓扑域（同一节点）的落点标为**待核验**。能避开待核验落点的完整方案照常展示；只有放开待核验落点才有完整方案时判定**无法确认**，点名一份候选方案涉及的常驻 Pod 与拓扑域；放开后仍无解则报告**无完整方案**。后两种结果都撤下落点 |
 | 完整性 | 所有待迁 Pod 必须在同一份方案中同时放下，采用 MRV + 回溯求解；找不到即判定无完整方案 |
 | DaemonSet/静态 Pod | drain 本就不迁移这类 Pod，自动列入 `excluded_pods` 并说明原因 |
 
@@ -26,9 +28,9 @@ app/
   planner.py          # 候选筛选、资源核算、双向反亲和、回溯求完整方案
   main.py             # FastAPI 路由（multipart 与 JSON 两种调用方式）
   static/index.html   # 单页前端（上传 → 勾选 → 试算 → 撤旧方案）
-samples/              # 4 组可直接试算的快照（由脚本生成）
+samples/              # 6 组可直接试算的快照（由脚本生成）
 scripts/generate_samples.py
-tests/test_planner.py # 20 个自测用例
+tests/test_planner.py # 31 个自测用例
 Dockerfile / docker-compose.yml
 ```
 
@@ -77,6 +79,8 @@ curl -s \
 | 资源超配 | `samples/infeasible-resource/` | 大 Pod 在两个承接节点上 CPU/内存均不足，无完整方案并给出逐节点缺口 |
 | 反亲和无解 | `samples/infeasible-anti/` | 两个互相反亲和的 web Pod 只剩一个合格承接节点（另一节点已有 web、第三个节点不 Ready），回溯失败 |
 | 不支持约束 | `samples/unsupported/` | 多容器+卷、init 容器 Pod 被拒绝；勾选污点节点同样被拒绝 |
+| 待核验可避开 | `samples/unverifiable-avoidable/` | 常驻 `db-0` 带 `matchExpressions` 硬反亲和，`web-1` 避开待核验落点 `node-b`、落 `node-c`，照常展示完整方案 |
+| 待核验避不开 | `samples/unverifiable/` | `node-c` 资源不足，唯一可行落点是待核验的 `node-b`：判定无法确认，点名常驻 `db-0` 与拓扑域 `kubernetes.io/hostname=node-b`，不下发落点 |
 
 ## 自测
 
@@ -87,7 +91,8 @@ python -m pytest tests/ -v
 
 ## 已知边界（未实现/刻意不支持）
 
-- 不支持硬 `nodeAffinity`、硬 `podAffinity`、非 hostname 拓扑键与 `matchExpressions`；遇到即报错并撤下方案
+- 不支持硬 `nodeAffinity`、硬 `podAffinity`、非 hostname 拓扑键；遇到即报错并撤下方案
+- `matchExpressions` 不求值：待迁 Pod 携带即报不支持；常驻 Pod 携带时按“待核验落点”处理（见上表）；显式指定 `namespaces`/`namespaceSelector` 的条款超出默认同命名空间范围，只报不支持、不参与待核验
 - 不处理 PVC/存储卷、init 容器、多容器（sidecar）Pod
 - 软亲和/反亲和（`preferredDuringScheduling*`）不参与硬性可调度性判断，直接忽略
 - 不模拟真实调度器的 taints/tolerations 联动、端口占用、设备插件等；无污点节点之外的节点不参与

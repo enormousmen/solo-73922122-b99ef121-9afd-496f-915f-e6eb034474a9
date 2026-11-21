@@ -89,6 +89,17 @@ class AntiSelector:
 
 
 @dataclass
+class UnverifiableAntiTerm:
+    """无法求值的硬反亲和条款：含 matchExpressions（表达式不支持、不求值），
+    但默认匹配同命名空间且拓扑键为 hostname。
+
+    常驻 Pod 携带此类条款时，同命名空间待迁 Pod 落入其所在拓扑域
+    （即同一节点）只能标为“待核验”，不能当作已验证的落点。
+    """
+    expressions: list[dict] = field(default_factory=list)
+
+
+@dataclass
 class PodInfo:
     namespace: str
     name: str
@@ -101,6 +112,7 @@ class PodInfo:
     node_selector: dict[str, str]
     anti_selectors: list[AntiSelector]
     unsupported_reasons: list[str] = field(default_factory=list)
+    unverifiable_anti_terms: list[UnverifiableAntiTerm] = field(default_factory=list)
     container_count: int = 0
     init_container_count: int = 0
     volume_count: int = 0
@@ -159,9 +171,23 @@ def parse_nodes(payload: Any) -> list[NodeInfo]:
     return nodes
 
 
-def _extract_anti_selectors(affinity: dict) -> tuple[list[AntiSelector], list[str]]:
-    """提取 hostname 拓扑键的 matchLabels 硬反亲和，其余硬约束报为不支持。"""
+def _defaults_to_own_namespace(term: dict) -> bool:
+    """条款未显式给出 namespaces / namespaceSelector 时，按 Kubernetes 默认
+    只匹配 Pod 自身命名空间 —— 这是试算器唯一能界定的命名空间范围。"""
+    return not term.get("namespaces") and not term.get("namespaceSelector")
+
+
+def _extract_anti_terms(
+    affinity: dict,
+) -> tuple[list[AntiSelector], list[UnverifiableAntiTerm], list[str]]:
+    """提取硬反亲和条款，返回 (可求值的 matchLabels 选择器, 待核验条款, 不支持原因)。
+
+    matchExpressions 一律不求值、仍报不支持；其中默认匹配同命名空间且
+    拓扑键为 hostname 的条款额外记入待核验清单，供试算器把对应落点标为
+    待核验，而不是像过去一样静默漏掉。
+    """
     selectors: list[AntiSelector] = []
+    unverifiable: list[UnverifiableAntiTerm] = []
     unsupported: list[str] = []
 
     pod_affinity = affinity.get("podAffinity") or {}
@@ -182,14 +208,19 @@ def _extract_anti_selectors(affinity: dict) -> tuple[list[AntiSelector], list[st
             )
             continue
         selector = term.get("labelSelector") or {}
-        if selector.get("matchExpressions"):
+        expressions = selector.get("matchExpressions") or []
+        if expressions:
             unsupported.append("硬反亲和 labelSelector 含 matchExpressions，仅支持 matchLabels")
+            if _defaults_to_own_namespace(term):
+                unverifiable.append(UnverifiableAntiTerm(
+                    expressions=[dict(e) for e in expressions if isinstance(e, dict)]
+                ))
             continue
         match_labels = selector.get("matchLabels") or {}
         if match_labels:
             selectors.append(AntiSelector({k: str(v) for k, v in match_labels.items()}))
     # preferredDuringScheduling* 属于软约束，不影响硬性可调度性，忽略。
-    return selectors, unsupported
+    return selectors, unverifiable, unsupported
 
 
 def parse_pods(payload: Any) -> list[PodInfo]:
@@ -219,9 +250,10 @@ def parse_pods(payload: Any) -> list[PodInfo]:
             unsupported.append(f"含 {len(volumes)} 个卷，仅支持无卷 Pod")
 
         anti_selectors: list[AntiSelector] = []
+        unverifiable_terms: list[UnverifiableAntiTerm] = []
         affinity = spec.get("affinity")
         if isinstance(affinity, dict):
-            anti_selectors, affinity_reasons = _extract_anti_selectors(affinity)
+            anti_selectors, unverifiable_terms, affinity_reasons = _extract_anti_terms(affinity)
             unsupported.extend(affinity_reasons)
 
         cpu_req = mem_req = 0
@@ -253,6 +285,7 @@ def parse_pods(payload: Any) -> list[PodInfo]:
             node_selector=node_selector,
             anti_selectors=anti_selectors,
             unsupported_reasons=unsupported,
+            unverifiable_anti_terms=unverifiable_terms,
             container_count=len(containers),
             init_container_count=len(init_containers),
             volume_count=len(volumes),

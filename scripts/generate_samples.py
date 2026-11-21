@@ -2,10 +2,14 @@
 """生成试算器的示例 NodeList / PodList 快照（仅用标准库）。
 
 场景：
-  feasible/            可迁移：资源 + nodeSelector + hostname 双向反亲和均满足
-  infeasible-resource/ 不可迁移：承接节点总资源放不下全部待迁 Pod
-  infeasible-anti/     不可迁移：双向硬反亲和导致无完整方案
-  unsupported/         不支持的约束：多容器、卷、init 容器、污点节点
+  feasible/               可迁移：资源 + nodeSelector + hostname 双向反亲和均满足
+  infeasible-resource/    不可迁移：承接节点总资源放不下全部待迁 Pod
+  infeasible-anti/        不可迁移：双向硬反亲和导致无完整方案
+  unsupported/            不支持的约束：多容器、卷、init 容器、污点节点
+  unverifiable-avoidable/ 常驻 Pod 带 matchExpressions 硬反亲和，但存在避开
+                          待核验落点的完整方案，照常展示
+  unverifiable/           只有放开待核验落点才有完整方案：无法确认，
+                          点名涉及的常驻 Pod 与拓扑域并撤下落点
 """
 from __future__ import annotations
 
@@ -34,9 +38,9 @@ def node(name, cpu, mem_mi, labels=None, taints=None, ready=True,
 
 
 def pod(namespace, name, node_name, cpu_m, mem_mi, labels=None,
-        node_selector=None, anti_labels=None, containers=1,
-        init_containers=0, volumes=0, phase="Running", owner=None,
-        mirror=False):
+        node_selector=None, anti_labels=None, anti_expressions=None,
+        containers=1, init_containers=0, volumes=0, phase="Running",
+        owner=None, mirror=False):
     labels = labels or {}
     spec: dict = {
         "nodeName": node_name,
@@ -57,12 +61,17 @@ def pod(namespace, name, node_name, cpu_m, mem_mi, labels=None,
     if volumes:
         spec["volumes"] = [{"name": f"vol{i}", "emptyDir": {}}
                            for i in range(volumes)]
-    if anti_labels:
+    if anti_labels or anti_expressions:
+        selector: dict = {}
+        if anti_labels:
+            selector["matchLabels"] = anti_labels
+        if anti_expressions:
+            selector["matchExpressions"] = anti_expressions
         spec["affinity"] = {
             "podAntiAffinity": {
                 "requiredDuringSchedulingIgnoredDuringExecution": [
                     {"topologyKey": "kubernetes.io/hostname",
-                     "labelSelector": {"matchLabels": anti_labels}}
+                     "labelSelector": selector}
                 ]
             }
         }
@@ -198,11 +207,55 @@ def unsupported():
     return nodes, pods, ["drain-1"]
 
 
+# --------------------------------------------------------------------------- #
+# 场景 5：常驻 Pod 带 matchExpressions 硬反亲和，但可避开待核验落点
+# --------------------------------------------------------------------------- #
+def unverifiable_avoidable():
+    nodes = node_list([
+        node("drain-1", "4", 4096, {"workload": "app"}),
+        node("node-b", "4", 4096, {"workload": "app"}),
+        node("node-c", "4", 4096, {"workload": "app"}),
+    ])
+    pods = pod_list([
+        # node-b 上的常驻 Pod：matchExpressions 硬反亲和（表达式不求值），
+        # 同命名空间待迁 Pod 落入 node-b 即待核验
+        pod("team1", "db-0", "node-b", 500, 512, {"app": "db"},
+            anti_expressions=[{"key": "app", "operator": "In",
+                               "values": ["web"]}]),
+        # node-c 资源充足：web-1 可避开待核验落点 node-b
+        pod("team1", "web-1", "drain-1", 500, 512, {"app": "web"}),
+    ])
+    return nodes, pods, ["drain-1"]
+
+
+# --------------------------------------------------------------------------- #
+# 场景 6：只有放开待核验落点才有完整方案 → 无法确认
+# --------------------------------------------------------------------------- #
+def unverifiable():
+    nodes = node_list([
+        node("drain-1", "4", 4096, {"workload": "app"}),
+        node("node-b", "4", 4096, {"workload": "app"}),
+        node("node-c", "4", 4096, {"workload": "app"}),
+    ])
+    pods = pod_list([
+        # node-b 上的常驻 Pod：matchExpressions 硬反亲和，落入 node-b 待核验
+        pod("team1", "db-0", "node-b", 500, 512, {"app": "db"},
+            anti_expressions=[{"key": "app", "operator": "In",
+                               "values": ["web"]}]),
+        # node-c 只剩 400m CPU：web-1（500m）放不下，唯一可行落点是待核验的 node-b
+        pod("team1", "fill-c", "node-c", 3600, 3584, {"app": "fill"}),
+        pod("team1", "web-1", "drain-1", 500, 512, {"app": "web"}),
+    ])
+    return nodes, pods, ["drain-1"]
+
+
 SCENARIOS = {
     "feasible": (feasible, "可迁移：完整方案可求"),
     "infeasible-resource": (infeasible_resource, "不可迁移：资源超配"),
     "infeasible-anti": (infeasible_anti, "不可迁移：反亲和无解"),
     "unsupported": (unsupported, "不支持：多容器/卷/init/污点"),
+    "unverifiable-avoidable": (unverifiable_avoidable, "待核验可避开：照常出方案"),
+    "unverifiable": (unverifiable, "待核验避不开：无法确认"),
 }
 
 

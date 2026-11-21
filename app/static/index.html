@@ -34,6 +34,8 @@
   .banner { border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; font-size: 14px; }
   .banner.fail { background: #ffebe9; border: 1px solid #ffabaf; }
   .banner.ok { background: #dafbe1; border: 1px solid #7ee787; }
+  .banner.warn { background: #fff8c5; border: 1px solid #d4a72c; }
+  .banner table { margin-top: 10px; background: #fff; }
   .muted { color: #57606a; }
   code { background: var(--bg-soft); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
   .scroll { max-height: 340px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
@@ -193,7 +195,31 @@ function renderFail(messages) {
     + messages.map(m => `<li>${escapeHtml(m)}</li>`).join("") + "</ul></div>";
 }
 
+function renderUnverifiable(data) {
+  // 只有放开待核验落点才有完整方案：不展示任何落点，点名涉及的常驻 Pod 与拓扑域
+  const items = data.pending_verification || [];
+  let html = '<div class="banner warn"><b>无法确认完整方案，旧落点已撤下。</b>'
+    + '<div style="margin-top:6px">只有放开下列待核验落点才能凑齐完整方案；相关常驻 Pod 的 '
+    + '<code>matchExpressions</code> 硬反亲和未参与求值，落点需人工核验后才可执行。</div>';
+  if (items.length) {
+    html += table(
+      ["待迁 Pod", "拟落节点", "涉及的常驻 Pod", "拓扑域", "未求值的 matchExpressions"],
+      items.map(i => [
+        podRef(i.pod), "<b>" + escapeHtml(i.node) + "</b>", podRef(i.resident_pod),
+        escapeHtml(i.topology_key + "=" + i.topology_value),
+        "<code>" + escapeHtml(JSON.stringify(i.expressions)) + "</code>",
+      ]));
+  }
+  if (data.violations?.length) {
+    html += '<ul style="margin:8px 0 0 18px">'
+      + data.violations.map(v => `<li>${escapeHtml(v)}</li>`).join("") + "</ul>";
+  }
+  html += "</div>";
+  $("resultArea").innerHTML = html;
+}
+
 function renderResult(data) {
+  if (data.status === "unverifiable") { renderUnverifiable(data); return; }
   if (!data.feasible) {
     const msgs = [...(data.violations || [])];
     (data.diagnostics || []).forEach(d =>
